@@ -14,6 +14,22 @@ CLEANED_DB  = "BankingETL"
 FILES_URL   = "https://raw.githubusercontent.com/odilbekmarimov/DemoProject/main/files_final"
 MAP_URL     = "https://raw.githubusercontent.com/odilbekmarimov/DemoProject/main/column_table_map.json"
 
+# Load column map JSON
+resp = requests.get(MAP_URL); resp.raise_for_status()
+column_map = resp.json()
+
+# Dynamically build TABLE_IDS and CSV_FILES
+TABLE_IDS = {
+    tid: meta["table"]
+    for tid, meta in column_map.items()
+    if "columns" in meta and tid.isdigit()
+}
+CSV_FILES = {
+    tid: meta["file"]
+    for tid, meta in column_map.items()
+    if "columns" in meta and tid.isdigit()
+}
+
 # Output directory
 CLEANED_DIR = "cleaned_data_csv"
 os.makedirs(CLEANED_DIR, exist_ok=True)
@@ -50,22 +66,6 @@ CREATE TABLE dbo.retrieveinfo (
 )
 """)
 odbc_conn.commit()
-
-# Load column map JSON
-resp = requests.get(MAP_URL); resp.raise_for_status()
-column_map = resp.json()
-
-# Dynamically build TABLE_IDS and CSV_FILES
-TABLE_IDS = {
-    tid: meta["table"]
-    for tid, meta in column_map.items()
-    if "columns" in meta and tid.isdigit()
-}
-CSV_FILES = {
-    tid: meta["file"]
-    for tid, meta in column_map.items()
-    if "columns" in meta and tid.isdigit()
-}
 
 # Logging
 LOG_FILE = "retrieveinfo_log.txt"
