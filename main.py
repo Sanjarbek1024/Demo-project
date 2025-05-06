@@ -14,22 +14,11 @@ CLEANED_DB  = "BankingETL"
 FILES_URL   = "https://raw.githubusercontent.com/odilbekmarimov/DemoProject/main/files_final"
 MAP_URL     = "https://raw.githubusercontent.com/odilbekmarimov/DemoProject/main/column_table_map.json"
 
-# From Table ID to Human-readable names
-TABLE_IDS = {
-    "01": "users",
-    "02": "cards",
-    "03": "transactions",
-    "04": "logs",
-    "05": "reports",
-    "07": "scheduled_payments"
-}
-
-CSV_FILES = [f"t{tid}.csv" for tid in TABLE_IDS.keys()]
-
-CLEANED_DIR = "cleaned_data_csv"        # Local cleaned data folder
+# Output directory
+CLEANED_DIR = "cleaned_data_csv"
 os.makedirs(CLEANED_DIR, exist_ok=True)
 
-# Engines
+# Create SQLAlchemy engine
 def get_engine(db):
     conn_str = urllib.parse.quote_plus(
         f"DRIVER={{ODBC Driver 17 for SQL Server}};"
@@ -41,7 +30,7 @@ def get_engine(db):
 
 cleaned_engine = get_engine(CLEANED_DB)
 
-# Connection with SQL server
+# pyodbc connection
 odbc_conn = pyodbc.connect(
     f"DRIVER={{ODBC Driver 17 for SQL Server}};"
     f"SERVER={SQL_SERVER};"
@@ -62,22 +51,33 @@ CREATE TABLE dbo.retrieveinfo (
 """)
 odbc_conn.commit()
 
-# Loading column map
+# Load column map JSON
 resp = requests.get(MAP_URL); resp.raise_for_status()
 column_map = resp.json()
 
-# Log file
+# Dynamically build TABLE_IDS and CSV_FILES
+TABLE_IDS = {
+    tid: meta["table"]
+    for tid, meta in column_map.items()
+    if "columns" in meta and tid.isdigit()
+}
+CSV_FILES = {
+    tid: meta["file"]
+    for tid, meta in column_map.items()
+    if "columns" in meta and tid.isdigit()
+}
+
+# Logging
 LOG_FILE = "retrieveinfo_log.txt"
 with open(LOG_FILE, "w", encoding="utf-8") as log_f:
     log_f.write("source_file,retrieved_at,total_rows,processed_rows,errors,notes\n")
 
-for csv_name in CSV_FILES:
-    tid = csv_name[1:3]
-    table = TABLE_IDS[tid]
+# Process each table
+for tid, table in TABLE_IDS.items():
+    csv_name = CSV_FILES[tid]
     url = f"{FILES_URL}/{csv_name}"
     print(f"\nDownloading {csv_name} ({table}) ...")
 
-    #Downloading table files
     try:
         r = requests.get(url); r.raise_for_status()
         df_raw = pd.read_csv(io.StringIO(r.text))
@@ -85,35 +85,36 @@ for csv_name in CSV_FILES:
         print(f"Download error: {e}")
         cursor.execute(
             "INSERT INTO retrieveinfo (source_file, retrieved_at, total_rows, processed_rows, errors, notes) VALUES (?,?,?,?,?,?)",
-            f"{table}.csv", datetime.now(), 0, 0, 1, str(e)
+            csv_name, datetime.now(), 0, 0, 1, str(e)
         )
         odbc_conn.commit()
-        with open("retrieveinfo_log.txt", "a", encoding="utf-8") as log_f:
-            log_f.write(f"{table}.csv,{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},0,0,1,error download\n")
+        with open(LOG_FILE, "a", encoding="utf-8") as log_f:
+            log_f.write(f"{csv_name},{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},0,0,1,error download\n")
         continue
 
     total_rows = len(df_raw)
 
-    cols = column_map.get(tid, {}).get("columns", {})
-    rename_dict = {f"{tid}-{k}":v for k,v in cols.items()}
+    cols = column_map[tid]["columns"]
+    rename_dict = {f"{tid}-{k}": v for k, v in cols.items()}
     df = df_raw.rename(columns=rename_dict).copy()
     df.columns = df.columns.str.strip()
 
     if "id" not in df.columns:
-        df.insert(0, "id", range(1, len(df)+1))
+        df.insert(0, "id", range(1, len(df) + 1))
 
     if "is_vip" in df:     
         df["is_vip"] = df["is_vip"].astype(bool)
     if "is_blocked" in df:  
         df["is_blocked"] = df["is_blocked"].astype(bool)
     for num in ["amount", "total_balance", "balance", "limit_amount",
-                 "total_transactions", "flagged_transactions", "total_amount"]:
+                "total_transactions", "flagged_transactions", "total_amount"]:
         if num in df:
             df[num] = pd.to_numeric(df[num], errors="coerce").fillna(0)
     for dt in df.columns:
         if dt.endswith("_at") or "date" in dt:
             df[dt] = pd.to_datetime(df[dt], errors="coerce")
 
+    # Save cleaned
     clean_csv = f"{table}.csv"
     df.to_csv(f"{CLEANED_DIR}/{clean_csv}", index=False)
     df.to_sql(table, cleaned_engine, if_exists='replace', index=False)
@@ -121,16 +122,17 @@ for csv_name in CSV_FILES:
 
     cursor.execute(
         "INSERT INTO retrieveinfo (source_file, retrieved_at, total_rows, processed_rows, errors, notes) VALUES (?,?,?,?,?,?)",
-        f"{table}.csv", datetime.now(), total_rows, len(df), 0, "loaded"
+        csv_name, datetime.now(), total_rows, len(df), 0, "loaded"
     )
     odbc_conn.commit()
-    with open("retrieveinfo_log.txt", "a", encoding="utf-8") as log_f:
-        log_f.write(f"{table}.csv,{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{total_rows},{len(df)},0,loaded\n")
+    with open(LOG_FILE, "a", encoding="utf-8") as log_f:
+        log_f.write(f"{csv_name},{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{total_rows},{len(df)},0,loaded\n")
 
+# Derived tables
 print("\nGenerating derived tables...\n")
 
-df_users        = pd.read_csv(os.path.join(CLEANED_DIR, "users.csv"))
-df_cards        = pd.read_csv(os.path.join(CLEANED_DIR, "cards.csv"))
+df_users = pd.read_csv(os.path.join(CLEANED_DIR, "users.csv"))
+df_cards = pd.read_csv(os.path.join(CLEANED_DIR, "cards.csv"))
 df_transactions = pd.read_csv(os.path.join(CLEANED_DIR, "transactions.csv"))
 
 # Fraud Detection
@@ -143,7 +145,6 @@ fd = fd[fd["amount"] > fd["limit_amount"]].copy()
 fd["reason"] = "Amount exceeds card limit"
 fd["status"] = "flagged"
 
-# Safely get columns
 fraud_out = pd.DataFrame()
 fraud_out["transaction_id"] = fd["id_txn"]
 fraud_out["from_card_id"] = fd["from_card_id"]
@@ -183,4 +184,5 @@ print("blocked_users created")
 cursor.close()
 odbc_conn.close()
 print("\nPython is finished huurrray! :D")
+
 
